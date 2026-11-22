@@ -46,7 +46,8 @@ function gen_gap_plot(data_n, n, t)
         label = L"\mathrm{DDGFact}^{+}",
         xlabel = L"s",
         ylabel = "gap",
-        title = L"n = %$(n), t = %$(t)",
+        # title = L"n = %$(n), t = %$(t)",
+        title = "",
     )
 
     plot!(

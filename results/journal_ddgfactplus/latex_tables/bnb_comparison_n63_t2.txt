@@ -1,0 +1,42 @@
+\begin{table}[htbp]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{cc|ccccc|cc}
+\hline
+$s$ & Relaxation & Root Gap & Gap & Nodes & Fixed & Time & CF & Prunes \\
+\hline
+\multirow{5}{*}{5} & $\mathrm{Trace}$ & 0.815 & 0.000 & 1171895 & -- & 11.8 & -- & -- \\
+ & $\mathrm{DDGFact}$ & 0.988 & 0.199 & 2011329 & 412884 & 7200.2 & -- & -- \\
+ & $\mathrm{DDGFact}\text{(CF)}$ & 0.988 & 0.000 & 1940040 & 85765 & 382.5 & 1377541 & 800875 \\
+ & $\mathrm{DDGFact}^{+}$ & 0.786 & 0.000 & 824341 & 34566 & 2698.4 & -- & -- \\
+ & $\mathrm{DDGFact}^{+}\text{(CF)}$ & 0.786 & 0.000 & 823977 & 32374 & 625.2 & 349908 & 0 \\
+\hline
+\multirow{5}{*}{10} & $\mathrm{Trace}$ & 1.069 & 0.644 & 356374223 & -- & 7200.2 & -- & -- \\
+ & $\mathrm{DDGFact}$ & 1.344 & 1.217 & 896049 & 0 & 7200.3 & -- & -- \\
+ & $\mathrm{DDGFact}\text{(CF)}$ & 1.344 & 1.125 & 27924407 & 0 & 7200.5 & 18009093 & 0 \\
+ & $\mathrm{DDGFact}^{+}$ & 1.069 & 0.863 & 1613345 & 0 & 7200.2 & -- & -- \\
+ & $\mathrm{DDGFact}^{+}\text{(CF)}$ & 1.069 & 0.781 & 17410155 & 0 & 7200.2 & 9255824 & 0 \\
+\hline
+\multirow{5}{*}{15} & $\mathrm{Trace}$ & 1.348 & 1.138 & 246999195 & -- & 7200.5 & -- & -- \\
+ & $\mathrm{DDGFact}$ & 1.667 & 1.598 & 712673 & 0 & 7200.6 & -- & -- \\
+ & $\mathrm{DDGFact}\text{(CF)}$ & 1.667 & 1.557 & 19820701 & 0 & 7201.0 & 14618777 & 0 \\
+ & $\mathrm{DDGFact}^{+}$ & 1.348 & 1.231 & 1339689 & 0 & 7200.5 & -- & -- \\
+ & $\mathrm{DDGFact}^{+}\text{(CF)}$ & 1.348 & 1.195 & 12655203 & 0 & 7200.5 & 6850056 & 0 \\
+\hline
+\multirow{5}{*}{20} & $\mathrm{Trace}$ & 1.495 & 1.361 & 178772527 & -- & 7201.0 & -- & -- \\
+ & $\mathrm{DDGFact}$ & 1.848 & 1.804 & 654419 & 0 & 7202.0 & -- & -- \\
+ & $\mathrm{DDGFact}\text{(CF)}$ & 1.848 & 1.779 & 14841519 & 0 & 7201.1 & 11716426 & 0 \\
+ & $\mathrm{DDGFact}^{+}$ & 1.495 & 1.417 & 1206997 & 0 & 7200.9 & -- & -- \\
+ & $\mathrm{DDGFact}^{+}\text{(CF)}$ & 1.495 & 1.393 & 10922463 & 0 & 7201.0 & 6026841 & 0 \\
+\hline
+\multirow{5}{*}{25} & $\mathrm{Trace}$ & 1.609 & 1.525 & 131192235 & -- & 7201.4 & -- & -- \\
+ & $\mathrm{DDGFact}$ & 1.993 & 1.970 & 611659 & 0 & 7201.7 & -- & -- \\
+ & $\mathrm{DDGFact}\text{(CF)}$ & 1.993 & 1.953 & 11665719 & 0 & 7201.7 & 9496805 & 0 \\
+ & $\mathrm{DDGFact}^{+}$ & 1.609 & 1.567 & 894779 & 0 & 7201.4 & -- & -- \\
+ & $\mathrm{DDGFact}^{+}\text{(CF)}$ & 1.609 & 1.547 & 9363831 & 0 & 7201.4 & 5326242 & 0 \\
+\hline
+\end{tabular}
+}
+\caption{Placeholder caption.}
+\label{tab:bnb_comparison_n63_t2_rank3}
+\end{table}

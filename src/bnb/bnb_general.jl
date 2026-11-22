@@ -89,7 +89,7 @@ end
 function _make_node_kwargs(;
     relaxation,
     psi,
-    plus_cf,
+    cf_trace,
     psi_trace,
     diagonal_order,
     calibration_method,
@@ -103,7 +103,7 @@ function _make_node_kwargs(;
     return (
         relaxation = relaxation,
         psi = psi,
-        plus_cf = plus_cf,
+        cf_trace = cf_trace,
         psi_trace = psi_trace,
         diagonal_order = diagonal_order,
         calibration_method = calibration_method,
@@ -194,7 +194,8 @@ function _bound_child!(
         return nothing
     end
 
-    if node_kwargs.relaxation == :DDGFactplus
+    if node_kwargs.cf_trace &&
+        node_kwargs.relaxation in (:DDGFact, :DDGFactplus)
         psi_trace = node_kwargs.psi_trace
         ub_trace = trace_upper_bound(C, s, t, psi_trace; F1, F0)
 
@@ -294,7 +295,8 @@ function _bound_child!(
             nfix1 = cnt.nfix1 + length(F1f) - length(F1),
         )
 
-        if node_kwargs.relaxation == :DDGFactplus
+        if node_kwargs.cf_trace &&
+            node_kwargs.relaxation in (:DDGFact, :DDGFactplus)
             psi_trace = node_kwargs.psi_trace
             ub_trace = trace_upper_bound(C, s, t, psi_trace; F1 = F1f, F0 = F0f)
 
@@ -466,7 +468,7 @@ function solve_bnb_ddfact(
     relaxation = DDGFact,
     fixing_rule::Symbol = relaxation == :Trace ? :none : :dual,
     psi::Union{Nothing,Float64} = nothing,
-    plus_cf::Bool = false,
+    cf_trace::Bool = false,
     time_limit::Real = 3600.0,
     verbose::Bool = true,
     calibration_method::Symbol = :bfgs,
@@ -525,12 +527,15 @@ function solve_bnb_ddfact(
         diagonal_order = sortperm(diag(C); rev = true)
     end
 
-    psi_trace = relaxation == :DDGFactplus ? (psi === nothing ? _default_psi(C; psi_margin, psi_floor) : psi) : nothing
+    psi_trace =
+        relaxation in (:DDGFact, :DDGFactplus) ?
+        (psi === nothing ? _default_psi(C; psi_margin, psi_floor) : psi) :
+        nothing
 
     root_node_kwargs = _make_node_kwargs(
         relaxation = relaxation,
         psi = psi,
-        plus_cf = plus_cf,
+        cf_trace = cf_trace,
         psi_trace = psi_trace,
         diagonal_order = diagonal_order,
         calibration_method = calibration_method,
@@ -545,7 +550,7 @@ function solve_bnb_ddfact(
     child_node_kwargs = _make_node_kwargs(
         relaxation = relaxation,
         psi = psi,
-        plus_cf = plus_cf,
+        cf_trace = cf_trace,
         psi_trace = psi_trace,
         diagonal_order = diagonal_order,
         calibration_method = calibration_method,
@@ -757,7 +762,7 @@ function solve_bnb_ddfact(
         recalibrate_k = recalibrate_k,
         warm_start = warm_start,
 
-        plus_cf = plus_cf,
+        cf_trace = cf_trace,
         closed_form_uses =
             Int(round(get(bnb_timing, :closed_form_uses, 0.0))),
         closed_form_time =

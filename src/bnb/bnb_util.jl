@@ -1084,7 +1084,7 @@ function _gmesp_node(
     F0::Vector{Int};
     relaxation = DDGFact,
     psi::Union{Nothing,Float64} = nothing,
-    plus_cf::Bool = false,
+    cf_trace::Bool = false,
     psi_trace::Union{Nothing,Float64} = nothing,
     diagonal_order::Union{Nothing,Vector{Int}} = nothing,
     calibration_method::Symbol = :bfgs,
@@ -1211,7 +1211,7 @@ function _gmesp_node(
 
     _add_bnb_timing!(:node_setup_time, setup_time)
 
-    if plus_cf && relaxation == :DDGFactplus
+    if cf_trace && relaxation in (:DDGFact, :DDGFactplus)
         local psi_node
         local cf_valid
         local x_cf
@@ -1219,9 +1219,13 @@ function _gmesp_node(
 
         psi_time = @elapsed begin
             psi_node =
-                psi === nothing ?
-                _default_psi(Ck; psi_margin = psi_margin, psi_floor = psi_floor) :
-                psi
+                relaxation == :DDGFact ?
+                0.0 :
+                (
+                    psi === nothing ?
+                    _default_psi(Ck; psi_margin = psi_margin, psi_floor = psi_floor) :
+                    psi
+                )
         end
 
         _add_bnb_timing!(:node_setup_time, psi_time)
@@ -1243,39 +1247,74 @@ function _gmesp_node(
         if cf_valid
             local F
             local dual_sol
+            local primal_obj
 
-            primal_obj = DDGFactplus_value_at_x(
-                x_cf,
-                Ck,
-                t,
-                psi_node;
-                atol = atol,
-            )
-
-            factorization_time = @elapsed begin
-                F = factorize_matrix(
-                    Ck;
-                    psi = psi_node,
+            if relaxation == :DDGFact
+                primal_obj = DDGFact_value_at_x(
+                    x_cf,
+                    Ck,
+                    t;
                     atol = atol,
                 )
-            end
 
-            _add_bnb_timing!(:factorization_time, factorization_time)
+                factorization_time = @elapsed begin
+                    F = factorize_matrix(
+                        Ck;
+                        atol = atol,
+                    )
+                end
 
-            dual_time = @elapsed begin
-                dual_sol = DGFactplus_dual_solution_from_DDGFactplus_x(
+                _add_bnb_timing!(:factorization_time, factorization_time)
+
+                dual_time = @elapsed begin
+                    dual_sol = DGFact_dual_solution_from_DDGFact_x(
+                        x_cf,
+                        F,
+                        s,
+                        t;
+                        l = l,
+                        c = c,
+                        atol = atol,
+                    )
+                end
+
+                _add_bnb_timing!(:dual_solution_time, dual_time)
+
+            else
+                primal_obj = DDGFactplus_value_at_x(
                     x_cf,
-                    F,
-                    s,
+                    Ck,
                     t,
                     psi_node;
-                    l = l,
-                    c = c,
                     atol = atol,
                 )
+
+                factorization_time = @elapsed begin
+                    F = factorize_matrix(
+                        Ck;
+                        psi = psi_node,
+                        atol = atol,
+                    )
+                end
+
+                _add_bnb_timing!(:factorization_time, factorization_time)
+
+                dual_time = @elapsed begin
+                    dual_sol = DGFactplus_dual_solution_from_DDGFactplus_x(
+                        x_cf,
+                        F,
+                        s,
+                        t,
+                        psi_node;
+                        l = l,
+                        c = c,
+                        atol = atol,
+                    )
+                end
+
+                _add_bnb_timing!(:dual_solution_time, dual_time)
             end
 
-            _add_bnb_timing!(:dual_solution_time, dual_time)
             _add_bnb_timing!(:closed_form_uses, 1.0)
 
             return (

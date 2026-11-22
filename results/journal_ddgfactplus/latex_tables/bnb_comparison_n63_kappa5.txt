@@ -1,0 +1,42 @@
+\begin{table}[htbp]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{ccc|ccccc}
+\hline
+$s$ & $t$ & Relaxation & Root Gap & Gap & Nodes & Fixed & Time \\
+\hline
+\multirow{5}{*}{10} & \multirow{5}{*}{5} & $\mathrm{Trace}$ & 1.866 & 0.867 & 351941381 & -- & 7200.2 \\
+ &  & $\mathrm{DDGFact}$ & 2.009 & 1.715 & 916041 & 0 & 7200.2 \\
+ &  & $\mathrm{DDGFact}\text{(CF)}$ & 2.009 & 1.715 & 908485 & 0 & 7200.2 \\
+ &  & $\mathrm{DDGFact}^{+}$ & 1.489 & 1.090 & 1340749 & 0 & 7200.2 \\
+ &  & $\mathrm{DDGFact}^{+}\text{(CF)}$ & 1.489 & 1.091 & 1327565 & 0 & 7200.2 \\
+\hline
+\multirow{5}{*}{20} & \multirow{5}{*}{15} & $\mathrm{Trace}$ & 4.762 & 3.877 & 193882411 & -- & 7202.3 \\
+ &  & $\mathrm{DDGFact}$ & 3.004 & 2.746 & 637049 & 0 & 7201.0 \\
+ &  & $\mathrm{DDGFact}\text{(CF)}$ & 3.004 & 2.747 & 633203 & 0 & 7201.0 \\
+ &  & $\mathrm{DDGFact}^{+}$ & 1.855 & 1.566 & 864657 & 0 & 7201.0 \\
+ &  & $\mathrm{DDGFact}^{+}\text{(CF)}$ & 1.855 & 1.567 & 851127 & 0 & 7201.1 \\
+\hline
+\multirow{5}{*}{30} & \multirow{5}{*}{25} & $\mathrm{Trace}$ & 7.554 & 6.977 & 114811607 & -- & 7202.5 \\
+ &  & $\mathrm{DDGFact}$ & 3.192 & 2.942 & 634287 & 0 & 7202.2 \\
+ &  & $\mathrm{DDGFact}\text{(CF)}$ & 3.192 & 2.942 & 644729 & 0 & 7202.3 \\
+ &  & $\mathrm{DDGFact}^{+}$ & 1.738 & 1.516 & 693287 & 0 & 7202.2 \\
+ &  & $\mathrm{DDGFact}^{+}\text{(CF)}$ & 1.738 & 1.517 & 675987 & 0 & 7202.2 \\
+\hline
+\multirow{5}{*}{40} & \multirow{5}{*}{35} & $\mathrm{Trace}$ & 11.005 & 10.351 & 74942529 & -- & 7204.0 \\
+ &  & $\mathrm{DDGFact}$ & 3.244 & 2.974 & 527521 & 0 & 7204.7 \\
+ &  & $\mathrm{DDGFact}\text{(CF)}$ & 3.244 & 2.972 & 547145 & 0 & 7203.7 \\
+ &  & $\mathrm{DDGFact}^{+}$ & 1.415 & 1.221 & 634479 & 14354 & 7203.5 \\
+ &  & $\mathrm{DDGFact}^{+}\text{(CF)}$ & 1.415 & 1.222 & 623215 & 13966 & 7204.0 \\
+\hline
+\multirow{5}{*}{50} & \multirow{5}{*}{45} & $\mathrm{Trace}$ & 15.320 & 14.586 & 58711745 & -- & 7202.4 \\
+ &  & $\mathrm{DDGFact}$ & 3.485 & 3.058 & 578805 & 0 & 7202.6 \\
+ &  & $\mathrm{DDGFact}\text{(CF)}$ & 3.485 & 3.058 & 577199 & 0 & 7202.1 \\
+ &  & $\mathrm{DDGFact}^{+}$ & 1.189 & 0.836 & 628361 & 932225 & 7202.2 \\
+ &  & $\mathrm{DDGFact}^{+}\text{(CF)}$ & 1.189 & 0.837 & 620689 & 925397 & 7202.9 \\
+\hline
+\end{tabular}
+}
+\caption{Branch-and-bound experiments for $n = 63$ and $t = s - \kappa$, with $\kappa = 5$.}
+\label{tab:bnb_comparison_n63_kappa5}
+\end{table}

@@ -3,12 +3,12 @@ using DataFrames
 using Plots
 using LaTeXStrings
 
-n = [50]
+n = [63, 90]
 kappa = [2, 4, 6, 8]
 
 function gen_gap_plot(n, kappa)
     results_filepath =
-        "results/journal_ddgfactplus/results_root_gap_n$(n)_kappa$(kappa).csv"
+        "results/journal_ddgfactplus/csv_tables/results_root_gap_n$(n)_kappa$(kappa).csv"
 
     plots_dir = "plots/journal_ddgfactplus"
 
@@ -35,7 +35,8 @@ function gen_gap_plot(n, kappa)
         label = L"\mathrm{DGFact}",
         xlabel = L"s",
         ylabel = "gap",
-        title = L"n = %$(n), \kappa = %$(kappa)",
+        # title = L"n = %$(n), \kappa = %$(kappa)",
+        title = "",
     )
 
     plot!(

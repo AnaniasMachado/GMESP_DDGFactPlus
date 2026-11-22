@@ -24,14 +24,19 @@ include("../../bnb/bnb_general.jl")
 # Full instance
 # ============================================================
 
-data_n = 60
-k = 60
+data_n = 63
+k = 63
 
 s_values = [5, 10, 15, 20, 25]
 t = 2
 
-matfile = matopen("data/generated/rank3/data$(data_n)_rank3.mat")
-C_data = read(matfile, "C")
+# s_values = [10, 20, 30, 40, 50]
+# kappa = 5
+
+# matfile = matopen("data/generated/rank3/data$(data_n)_rank3.mat")
+matfile = matopen("data/data$(data_n).mat")
+# C_data = read(matfile, "C")
+C_data = read(matfile, "A")
 close(matfile)
 
 C_data = Matrix{Float64}(C_data)
@@ -75,22 +80,27 @@ runs = [
     (
         name = "Trace",
         relaxation = TraceBound,
-        plus_cf = false,
+        cf_trace = false,
     ),
-    # (
-    #     name = "DDGFact",
-    #     relaxation = DDGFact,
-    #     plus_cf = false,
-    # ),
+    (
+        name = "DDGFact",
+        relaxation = DDGFact,
+        cf_trace = false,
+    ),
+    (
+        name = "DDGFact_CF",
+        relaxation = DDGFact,
+        cf_trace = true,
+    ),
     (
         name = "DDGFactplus",
         relaxation = DDGFactplus,
-        plus_cf = false,
+        cf_trace = false,
     ),
     (
         name = "DDGFactplus_CF",
         relaxation = DDGFactplus,
-        plus_cf = true,
+        cf_trace = true,
     ),
 ]
 
@@ -124,7 +134,7 @@ for run in runs
         relaxation = run.relaxation,
         fixing_rule = run.relaxation == TraceBound ? :none : fixing_rule,
         psi = psi,
-        plus_cf = run.plus_cf,
+        cf_trace = run.cf_trace,
         time_limit = time_limit,
         verbose = false,
         atol = atol,
@@ -149,8 +159,14 @@ mkpath("results/journal_ddgfactplus")
 # results_filepath =
 #     "results/journal_ddgfactplus/bnb_data$(data_n)_n$(n)_s$(s)_t$(t)_rank3_trace.csv"
 
+# results_filepath =
+#     "results/journal_ddgfactplus/bnb_data$(data_n)_n$(n)_t$(t)_rank3.csv"
+
 results_filepath =
-    "results/journal_ddgfactplus/bnb_data$(data_n)_n$(n)_t$(t)_rank3.csv"
+    "results/journal_ddgfactplus/bnb_data$(data_n)_n$(n)_t$(t).csv"
+
+# results_filepath =
+#     "results/journal_ddgfactplus/bnb_data$(data_n)_n$(n)_kappa$(kappa).csv"
 
 cols = [
     :data_n,
@@ -159,7 +175,7 @@ cols = [
     :t,
 
     :relaxation,
-    :plus_cf,
+    :cf_trace,
     :fixing_rule,
 
     :bnb_gap,
@@ -215,6 +231,7 @@ end
 results = []
 
 for s in s_values
+    # t = s - kappa
 
     println("="^82)
     println("GMESP B&B comparison")
@@ -233,7 +250,7 @@ for s in s_values
         println("-"^82)
         println("Running:       $(run.name)")
         println("relaxation:    $(run.relaxation)")
-        println("plus_cf:       $(run.plus_cf)")
+        println("cf_trace:       $(run.cf_trace)")
         println("s:            $s")
         println("-"^82)
         flush(stdout)
@@ -251,7 +268,7 @@ for s in s_values
                 relaxation = run.relaxation,
                 fixing_rule = run.relaxation == TraceBound ? :none : fixing_rule,
                 psi = psi,
-                plus_cf = run.plus_cf,
+                cf_trace = run.cf_trace,
                 time_limit = time_limit,
                 verbose = verbose_bnb,
                 atol = atol,
@@ -274,7 +291,7 @@ for s in s_values
             t,
 
             run.name,
-            run.plus_cf,
+            run.cf_trace,
             String(st.fixing_rule),
 
             st.gap,
@@ -320,7 +337,7 @@ for s in s_values
             (
                 name = run.name,
                 relaxation = run.relaxation,
-                plus_cf = run.plus_cf,
+                cf_trace = run.cf_trace,
                 s = s,
                 S_best = S_best,
                 st = st,
