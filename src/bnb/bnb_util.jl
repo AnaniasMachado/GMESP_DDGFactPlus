@@ -1,15 +1,10 @@
 using LinearAlgebra
 using Printf
+using DataStructures: BinaryMaxHeap
 
-# =============================================================================
-# Utilities for GMESP branch-and-bound
-# =============================================================================
-
+const TraceBound = :Trace
 const DDGFact = :DDGFact
 const DDGFactplus = :DDGFactplus
-const DDGFactplusUpsilon = :DDGFactplusUpsilon
-const TraceBound = :Trace
-
 
 struct GMESPNode
     F1::Vector{Int}
@@ -18,113 +13,50 @@ struct GMESPNode
     x::Vector{Float64}
     keep::Vector{Int}
     depth::Int
-    gamma::Union{Nothing,Vector{Float64}}
 end
-
 
 Base.isless(a::GMESPNode, b::GMESPNode) = a.ub < b.ub
 
+const BNB_TIMING = Dict{Symbol,Float64}()
 
-# =============================================================================
-# Basic utilities
-# =============================================================================
-
+# Normalize the relaxation name.
 function _normalize_relaxation(relaxation)
-    r = relaxation isa Symbol ? relaxation : Symbol(relaxation)
-
-    if r ∉ (:DDGFact, :DDGFactplus, :DDGFactplusUpsilon, :Trace)
+    r = Symbol(relaxation)
+    r in (:Trace, :DDGFact, :DDGFactplus) ||
         error("Unknown relaxation: $r")
-    end
-
     return r
 end
 
-
-function _normalize_fixing_rule(fixing_rule::Symbol)
-    if fixing_rule ∉ (:none, :dual, :primal, :both)
-        error("fixing_rule must be one of :none, :dual, :primal, or :both.")
-    end
-
-    return fixing_rule
+# Validate the variable-fixing rule.
+function _normalize_fixing_rule(rule::Symbol)
+    rule in (:none, :dual, :primal, :both) ||
+        error("Invalid fixing_rule: $rule")
+    return rule
 end
 
-
-function _normalize_calibration_method(calibration_method)
-    m = calibration_method isa Symbol ? calibration_method : Symbol(calibration_method)
-
-    if m ∉ (
-        :bfgs,
-        :ppa_one,
-        :ppa_full,
-        :pf_lmo_lmo,
-        :pf_lmo_po,
-        :pf_po_lmo,
-    )
-        error(
-            "calibration_method must be one of :bfgs, :ppa_one, :ppa_full, " *
-            ":pf_lmo_lmo, :pf_lmo_po, or :pf_po_lmo."
-        )
-    end
-
-    return m
-end
-
-
-function _calibration_method_uses_knitro(calibration_method::Symbol)
-    method = _normalize_calibration_method(calibration_method)
-
-    return method in (:bfgs, :ppa_one, :ppa_full)
-end
-
-
-function _validate_bnb_options(
-    relaxation::Symbol,
-    fixing_rule::Symbol,
-    upsilon_fixing::Symbol,
-    calibration_method::Symbol,
-)
-    if fixing_rule ∉ (:none, :dual, :primal, :both)
-        error("fixing_rule must be one of :none, :dual, :primal, or :both.")
-    end
-
-    if relaxation == :DDGFact && fixing_rule ∉ (:none, :dual)
-        error("DDGFact currently supports only fixing_rule = :none or :dual.")
-    end
-
-    if upsilon_fixing ∉ (:simple, :strong)
-        error("upsilon_fixing must be either :simple or :strong.")
-    end
+# Validate the B&B options.
+function _validate_bnb_options(relaxation::Symbol, fixing_rule::Symbol)
+    _normalize_relaxation(relaxation)
+    _normalize_fixing_rule(fixing_rule)
 
     if relaxation == :Trace && fixing_rule != :none
-        error("Trace relaxation requires fixing_rule = :none.")
+        error("TraceBound supports only :none fixing.")
     end
 
-    _normalize_calibration_method(calibration_method)
+    if relaxation == :DDGFact && fixing_rule in (:primal, :both)
+        error("DDGFact supports only :none and :dual fixing.")
+    end
 
     return nothing
 end
 
-
-function _restrict_gamma_to_child_keep(
-    parent_keep::Vector{Int},
-    parent_gamma::Vector{Float64},
-    child_keep::Vector{Int},
-)
-    @assert length(parent_keep) == length(parent_gamma)
-
-    pos = Dict(parent_keep[j] => j for j in eachindex(parent_keep))
-
-    return [parent_gamma[pos[i]] for i in child_keep]
-end
-
-
-# Exact GMESP objective at an integer subset S.
+# Evaluate the objective at a selected subset.
 function _gmesp_obj(C::AbstractMatrix, S::Vector{Int}, t::Int)
-    λ = reverse(eigvals(Symmetric(Matrix(C[S, S]))))
-    return sum(log, max.(λ[1:t], 1e-30))
+    lambda = reverse(eigvals(Symmetric(Matrix(C[S, S]))))
+    return sum(log, max.(lambda[1:t], 1e-30))
 end
 
-
+# Recover a subset from a relaxation solution.
 function _subset_value(
     C::Symmetric,
     s::Int,
@@ -132,950 +64,203 @@ function _subset_value(
     keep::Vector{Int},
     x::Vector{Float64},
 )
-    (isempty(x) || length(keep) < s) && return (-Inf, Int[])
+    (isempty(x) || length(keep) < s) && return -Inf, Int[]
 
-    order = sortperm(x, rev = true)
+    order = sortperm(x; rev = true)
     S = sort(keep[order[1:s]])
 
-    v = try
+    value = try
         _gmesp_obj(C, S, t)
     catch
         -Inf
     end
 
-    return v, S
+    return value, S
 end
 
-
+# Check whether a relaxation solution is integral.
 function _is_integer_point(x::AbstractVector)
     isempty(x) && return false
-    max_dist_to_integer = maximum(abs.(x .- round.(x)))
-    return max_dist_to_integer ≤ 1e-6
+    return maximum(abs.(x .- round.(x))) <= 1e-6
 end
 
+# Choose a branching variable.
+function _branch_var(
+    C::Symmetric,
+    keep::Vector{Int},
+    x::Vector{Float64},
+    F1::Vector{Int},
+    relaxation::Symbol,
+)
+    fixed = Set(F1)
 
-# function _branch_var(
-#     keep::Vector{Int},
-#     x::Vector{Float64},
-#     F1::Vector{Int},
-# )
-#     F1set = Set(F1)
-#     best_k = 0
-#     best_f = -1.0
+    if relaxation == :Trace ||
+       (relaxation == :DDGFactplus && _is_integer_point(x))
 
-#     for k in eachindex(keep)
-#         keep[k] in F1set && continue
-
-#         f = min(x[k], 1.0 - x[k])
-
-#         if f > best_f
-#             best_f = f
-#             best_k = k
-#         end
-#     end
-
-#     return best_k == 0 ? 0 : keep[best_k]
-# end
-
-
-function _branch_var(C::Symmetric, keep::Vector{Int}, x::Vector{Float64}, F1::Vector{Int}, relaxation::Symbol)
-    if relaxation == :Trace
         best_i = 0
         best_d = -Inf
 
         for i in keep
-            i in F1 && continue
+            i in fixed && continue
 
             if C[i, i] > best_d
-                best_d = C[i, i]
                 best_i = i
+                best_d = C[i, i]
             end
         end
 
         return best_i
     end
 
-    F1set = Set(F1)
-
-    if relaxation == :DDGFactplus && _is_integer_point(x)
-        best_i = 0
-        best_d = -Inf
-
-        for i in keep
-            i in F1set && continue
-
-            if C[i, i] > best_d
-                best_d = C[i, i]
-                best_i = i
-            end
-        end
-
-        return best_i
-    end
-
-    best_k = 0
-    best_f = -1.0
+    best_i = 0
+    best_f = -Inf
 
     for k in eachindex(keep)
-        keep[k] in F1set && continue
+        i = keep[k]
+        i in fixed && continue
 
         f = min(x[k], 1.0 - x[k])
 
         if f > best_f
+            best_i = i
             best_f = f
-            best_k = k
         end
     end
 
-    return best_k == 0 ? 0 : keep[best_k]
+    return best_i
 end
 
+# Map fixed-one indices to the reduced matrix.
+function _local_fix1_indices(
+    keep::Vector{Int},
+    F1::Vector{Int},
+)
+    positions = Dict(i => k for (k, i) in enumerate(keep))
+    return sort([positions[i] for i in F1])
+end
 
+# Choose a default value of psi.
 function _default_psi(
     C::Symmetric{<:Real,<:AbstractMatrix};
     psi_margin::Float64 = 1e-7,
     psi_floor::Float64 = 0.0,
 )
-    λmin = minimum(eigvals(Symmetric(Matrix(C))))
-    psi = max(psi_floor, λmin - psi_margin)
+    lambda_min = eigmin(C)
+    psi = max(psi_floor, lambda_min - psi_margin)
 
-    if psi <= 0.0
-        error(
-            "DDGFactplus requires psi > 0. Pass psi explicitly or use a " *
-            "positive definite matrix with λmin(C) > psi_margin.",
-        )
-    end
+    0.0 < psi <= lambda_min ||
+        error("DDGFact+ requires 0 < psi <= lambda_min(C).")
 
     return psi
 end
 
-
-function _local_fix1_indices(
-    keep::Vector{Int},
-    F1::Vector{Int},
-)
-    posn = Dict(v => k for (k, v) in enumerate(keep))
-    fix1 = Int[posn[i] for i in F1]
-    sort!(fix1)
-    return fix1
-end
-
-
-# =============================================================================
-# B&B timing accumulator
-# =============================================================================
-
-const BNB_TIMING = Dict{Symbol,Float64}()
-
+# Reset the B&B timing counters.
 function _reset_bnb_timing!()
     empty!(BNB_TIMING)
 
-    BNB_TIMING[:knitro_time] = 0.0
-    BNB_TIMING[:relaxation_solve_time] = 0.0
-    BNB_TIMING[:upsilon_calibration_time] = 0.0
-    BNB_TIMING[:factorization_time] = 0.0
-    BNB_TIMING[:dual_solution_time] = 0.0
-    BNB_TIMING[:variable_fixing_time] = 0.0
-    BNB_TIMING[:variable_fixing_calls] = 0.0
-    BNB_TIMING[:open_list_time] = 0.0
-    BNB_TIMING[:node_setup_time] = 0.0
-    BNB_TIMING[:bound_computation_time] = 0.0
-    BNB_TIMING[:closed_form_time] = 0.0
-    BNB_TIMING[:closed_form_uses] = 0.0
-    BNB_TIMING[:trace_prunes] = 0.0
+    for key in (
+        :knitro_time,
+        :relaxation_solve_time,
+        :factorization_time,
+        :dual_solution_time,
+        :variable_fixing_time,
+        :variable_fixing_calls,
+        :open_list_time,
+        :node_setup_time,
+        :bound_computation_time,
+        :closed_form_time,
+        :closed_form_uses,
+        :trace_prunes,
+    )
+        BNB_TIMING[key] = 0.0
+    end
 
     return nothing
 end
 
-
+# Accumulate a timing measurement.
 function _add_bnb_timing!(key::Symbol, value::Real)
     BNB_TIMING[key] = get(BNB_TIMING, key, 0.0) + Float64(value)
     return nothing
 end
 
-
+# Return a copy of the timing counters.
 function _copy_bnb_timing()
     return copy(BNB_TIMING)
 end
 
-
-# =============================================================================
-# Upsilon calibration dispatch
-# =============================================================================
-
-function _calibrate_upsilon_bfgs_from_params(
-    C::Symmetric{<:Real,<:AbstractMatrix},
-    s::Int,
-    t::Int,
-    param_set;
-    J1::AbstractVector{<:Integer} = Int[],
-    atol::Float64 = 1e-10,
+# Construct a standard node result.
+function _node_result(
+    relaxation::Symbol,
+    keep::Vector{Int},
+    x::Vector{Float64},
+    ub::Float64;
+    determined::Bool = false,
+    dual_solution = nothing,
+    l::Vector{Float64} = Float64[],
+    c::Vector{Float64} = Float64[],
+    psi = nothing,
+    F = nothing,
+    primal_obj::Float64 = NaN,
+    closed_form::Bool = false,
 )
-    return calibrate_upsilon_bfgs_ddfactplus(
-        C,
-        s,
-        t;
-        J1 = J1,
-        theta0 = get(param_set, :theta0, nothing),
-        atol = atol,
-        max_iter = get(param_set, :max_iter, get(param_set, :max_bfgs_iter, 20)),
-        grad_tol = get(param_set, :grad_tol, 1e-6),
-        step_tol = get(param_set, :step_tol, 1e-10),
-        psi_margin = get(param_set, :psi_margin, 1e-8),
-        psi_floor = get(param_set, :psi_floor, 0.0),
-        alpha0 = get(param_set, :alpha0, 1.0),
-        alpha_min = get(param_set, :alpha_min, 1e-8),
-        alpha_decay = get(param_set, :alpha_decay, 0.5),
-        armijo_c1 = get(param_set, :armijo_c1, 1e-4),
-        curvature_tol = get(param_set, :curvature_tol, 1e-10),
-        max_backtracks = get(param_set, :max_backtracks, 20),
-        max_theta_norm = get(param_set, :max_theta_norm, 50.0),
-        psi_derivative = get(param_set, :psi_derivative, true),
-        t1_reformulation = get(param_set, :t1_reformulation, true),
-        t1_fallback = get(param_set, :t1_fallback, true),
-        t1_fallback_limit = get(param_set, :t1_fallback_limit, 1),
-        theta_perturbation = get(param_set, :theta_perturbation, 1e-4),
-        use_steepest_descent_fallback =
-            get(param_set, :use_steepest_descent_fallback, true),
-        # DDGFact+_Upsilon relaxation tolerances.
-        knitro_outlev = get(param_set, :knitro_outlev, nothing),
-        knitro_opttol = get(param_set, :knitro_opttol, nothing),
-        knitro_feastol = get(param_set, :knitro_feastol, nothing),
-        verbose = get(param_set, :verbose, get(param_set, :verbose_bfgs, false)),
+    return (
+        ub = ub,
+        x = x,
+        keep = keep,
+        determined = determined,
+        relaxation = relaxation,
+        dual_solution = dual_solution,
+        l = l,
+        c = c,
+        psi = psi,
+        F = F,
+        primal_obj = primal_obj,
+        closed_form = closed_form,
     )
 end
 
-
-function _calibrate_upsilon_ppa_from_params(
-    C::Symmetric{<:Real,<:AbstractMatrix},
-    s::Int,
-    t::Int,
-    param_set;
-    J1::AbstractVector{<:Integer} = Int[],
-    atol::Float64 = 1e-10,
-    default_k::Real = 1,
-)
-    return calibrate_upsilon_ppa_ddfactplus(
-        C,
-        s,
-        t;
-        J1 = J1,
-        J0 = get(param_set, :J0, Int[]),
-
-        theta0 = get(param_set, :theta0, nothing),
-
-        # k = 1 gives one PPA iteration.
-        # k = Inf gives full PPA.
-        k = get(param_set, :k, default_k),
-
-        rho = get(param_set, :rho, 1e3),
-
-        # Full-PPA stopping criteria.
-        # For k = 1 these are harmless; the method stops after one iteration.
-        grad_tol = get(param_set, :grad_tol, 1e-2),
-        prox_obj_abs_tol = get(param_set, :prox_obj_abs_tol, 1e-8),
-        prox_step_tol = get(param_set, :prox_step_tol, 1e-8),
-        max_wall_time = get(param_set, :max_wall_time, Inf),
-
-        theta_perturbation = get(param_set, :theta_perturbation, 1e-2),
-        center_initial_theta = get(param_set, :center_initial_theta, false),
-
-        # Prefer new name, but allow old q_bound dictionaries to keep working.
-        theta_bound = get(param_set, :theta_bound, get(param_set, :q_bound, 20.0)),
-
-        psi_margin = get(param_set, :psi_margin, 1e-7),
-        psi_floor = get(param_set, :psi_floor, 0.0),
-        psi_derivative = get(param_set, :psi_derivative, true),
-        t1_reformulation = get(param_set, :t1_reformulation, false),
-
-        atol = atol,
-
-        # DDGFact+_Upsilon relaxation tolerances.
-        relax_knitro_outlev = get(param_set, :relax_knitro_outlev, nothing),
-        relax_knitro_opttol = get(param_set, :relax_knitro_opttol, nothing),
-        relax_knitro_feastol = get(param_set, :relax_knitro_feastol, nothing),
-
-        # Proximal subproblem tolerances.
-        knitro_feastol = get(param_set, :knitro_feastol, 1e-6),
-        knitro_opttol = get(param_set, :knitro_opttol, 1e-2),
-        knitro_xtol = get(param_set, :knitro_xtol, 1e-4),
-        knitro_ftol = get(param_set, :knitro_ftol, 1e-5),
-
-        knitro_maxtime_real = get(param_set, :knitro_maxtime_real, Inf),
-        knitro_algorithm = get(param_set, :knitro_algorithm, nothing),
-        knitro_bar_murule = get(param_set, :knitro_bar_murule, nothing),
-        knitro_honorbnds = get(param_set, :knitro_honorbnds, 1),
-        knitro_outlev = get(param_set, :knitro_outlev, 0),
-
-        cache_digits = get(param_set, :cache_digits, 12),
-        diagnostics = get(param_set, :diagnostics, false),
-        verbose = get(param_set, :verbose, false),
-    )
-end
-
-
-function _calibrate_upsilon_projection_free_from_params(
-    C::Symmetric{<:Real,<:AbstractMatrix},
-    s::Int,
-    t::Int,
-    param_set;
-    algorithm::Symbol,
-    J1::AbstractVector{<:Integer} = Int[],
-    atol::Float64 = 1e-10,
-)
-    result = calibrate_upsilon_projection_free_ddfactplus(
-        C,
-        s,
-        t;
-        algorithm = algorithm,
-        lmo_q_solver = get(param_set, :lmo_q_solver, false),
-
-        J1 = J1,
-        J0 = get(param_set, :J0, Int[]),
-
-        theta0 = get(param_set, :theta0, nothing),
-        x0 = get(param_set, :x0, nothing),
-        y0 = get(param_set, :y0, nothing),
-
-        max_iter = get(param_set, :max_iter, 500),
-        min_iter = get(param_set, :min_iter, 100),
-        iteration_power = get(param_set, :iteration_power, 1.5),
-
-        theta_bound = get(param_set, :theta_bound, 20.0),
-
-        tau0 = get(param_set, :tau0, 0.02),
-        tau_power = get(param_set, :tau_power, 2.0 / 3.0),
-
-        beta0 = get(param_set, :beta0, 1.0),
-        beta_power = get(param_set, :beta_power, 1.0 / 6.0),
-
-        Lqq_hat = get(param_set, :Lqq_hat, 1.0),
-
-        psi_margin = get(param_set, :psi_margin, 1e-7),
-        psi_floor = get(param_set, :psi_floor, 0.0),
-        psi_derivative = get(param_set, :psi_derivative, true),
-        atol = atol,
-
-        gurobi_output_flag = get(param_set, :gurobi_output_flag, 0),
-        gurobi_opttol = get(param_set, :gurobi_opttol, 1e-8),
-        gurobi_feastol = get(param_set, :gurobi_feastol, 1e-8),
-
-        diagnostics = get(param_set, :diagnostics, false),
-        verbose = get(param_set, :verbose, false),
-    )
-
-    gamma = exp.(result.theta)
-
-    psi_node, lambda_min = max_feasible_psi(
-        C,
-        gamma;
-        psi_margin = get(param_set, :psi_margin, 1e-7),
-        psi_floor = get(param_set, :psi_floor, 0.0),
-    )
-
-    return merge(
-        result,
-        (
-            gamma = gamma,
-            psi = psi_node,
-            lambda_min = lambda_min,
-        ),
-    )
-end
-
-
-function _calibrate_upsilon_from_params(
-    C::Symmetric{<:Real,<:AbstractMatrix},
-    s::Int,
-    t::Int,
-    calibration_method::Symbol,
-    calibration_params;
-    J1::AbstractVector{<:Integer} = Int[],
-    atol::Float64 = 1e-10,
-)
-    method = _normalize_calibration_method(calibration_method)
-
-    if method == :bfgs
-        return _calibrate_upsilon_bfgs_from_params(
-            C,
-            s,
-            t,
-            calibration_params;
-            J1 = J1,
-            atol = atol,
-        )
-
-    elseif method == :ppa_one
-        return _calibrate_upsilon_ppa_from_params(
-            C,
-            s,
-            t,
-            calibration_params;
-            J1 = J1,
-            atol = atol,
-            default_k = 1,
-        )
-
-    elseif method == :ppa_full
-        return _calibrate_upsilon_ppa_from_params(
-            C,
-            s,
-            t,
-            calibration_params;
-            J1 = J1,
-            atol = atol,
-            default_k = Inf,
-        )
-
-    elseif method == :pf_lmo_lmo
-        return _calibrate_upsilon_projection_free_from_params(
-            C,
-            s,
-            t,
-            calibration_params;
-            algorithm = :lmo_lmo,
-            J1 = J1,
-            atol = atol,
-        )
-
-    elseif method == :pf_lmo_po
-        return _calibrate_upsilon_projection_free_from_params(
-            C,
-            s,
-            t,
-            calibration_params;
-            algorithm = :lmo_po,
-            J1 = J1,
-            atol = atol,
-        )
-
-    elseif method == :pf_po_lmo
-        return _calibrate_upsilon_projection_free_from_params(
-            C,
-            s,
-            t,
-            calibration_params;
-            algorithm = :po_lmo,
-            J1 = J1,
-            atol = atol,
-        )
-
-    else
-        error("Unknown calibration method: $(method).")
-    end
-end
-
-
-# =============================================================================
-# Node relaxation
-# =============================================================================
-
+# Construct an infeasible node result.
 function _infeasible_node_return(
     keep::Vector{Int},
     relaxation::Symbol,
-    upsilon_fixing::Symbol,
 )
-    return (
-        ub = -Inf,
-        x = Float64[],
-        y = Float64[],
-        keep = keep,
-        determined = false,
-        relaxation = relaxation,
-        dual_solution = nothing,
-        l = Float64[],
-        c = Float64[],
-        gamma = nothing,
-        psi = nothing,
-        F = nothing,
-        upsilon_fixing = upsilon_fixing,
+    return _node_result(
+        relaxation,
+        keep,
+        Float64[],
+        -Inf,
     )
 end
 
-
+# Construct the exact result for a determined node.
 function _determined_node(
     C::Symmetric,
-    Ck::Union{Nothing,Symmetric},
     s::Int,
     t::Int,
     keep::Vector{Int},
     F1::Vector{Int},
-    x::Vector{Float64};
-    relaxation::Symbol,
-    psi::Union{Nothing,Float64},
-    calibration_method::Symbol,
-    calibration_params,
-    atol::Float64,
-    psi_margin::Float64,
-    psi_floor::Float64,
-    upsilon_fixing::Symbol,
-    fixed_gamma::Union{Nothing,Vector{Float64}} = nothing,
+    relaxation::Symbol;
+    psi::Union{Nothing,Float64} = nothing,
 )
-    if relaxation == :Trace
-        S = sort(keep[findall(>(0.5), x)])
+    S = length(F1) == s ? sort(F1) : copy(keep)
+    selected = Set(S)
+    x = [i in selected ? 1.0 : 0.0 for i in keep]
 
-        bound_time = @elapsed begin
-            ub = _gmesp_obj(C, S, t)
-        end
+    ub = _gmesp_obj(C, S, t)
 
-        _add_bnb_timing!(:bound_computation_time, bound_time)
-
-        return (
-            ub = ub,
-            x = x,
-            y = Float64[],
-            keep = keep,
-            determined = true,
-            relaxation = relaxation,
-            dual_solution = nothing,
-            l = Float64[],
-            c = Float64[],
-            gamma = nothing,
-            psi = psi,
-            F = nothing,
-            primal_obj = ub,
-            upsilon_fixing = upsilon_fixing,
-        )
-
-    elseif relaxation == :DDGFact
-        local ub_node
-
-        bound_time = @elapsed begin
-            ub_node = DDGFact_value_at_x(
-                x,
-                Ck,
-                t;
-                atol = atol,
-            )
-        end
-
-        _add_bnb_timing!(:relaxation_solve_time, bound_time)
-        _add_bnb_timing!(:bound_computation_time, bound_time)
-
-        return (
-            ub = ub_node,
-            x = x,
-            y = Float64[],
-            keep = keep,
-            determined = true,
-            relaxation = relaxation,
-            dual_solution = nothing,
-            l = Float64[],
-            c = Float64[],
-            gamma = nothing,
-            psi = 0.0,
-            F = nothing,
-            upsilon_fixing = upsilon_fixing,
-        )
-
-    elseif relaxation == :DDGFactplus
-        local psi_node
-
-        psi_time = @elapsed begin
-            psi_node =
-                psi === nothing ?
-                _default_psi(Ck; psi_margin = psi_margin, psi_floor = psi_floor) :
-                psi
-        end
-
-        _add_bnb_timing!(:node_setup_time, psi_time)
-
-        local ub_node
-
-        bound_time = @elapsed begin
-            ub_node = DDGFactplus_value_at_x(
-                x,
-                Ck,
-                t,
-                psi_node;
-                atol = atol,
-            )
-        end
-
-        _add_bnb_timing!(:relaxation_solve_time, bound_time)
-        _add_bnb_timing!(:bound_computation_time, bound_time)
-
-        return (
-            ub = ub_node,
-            x = x,
-            y = Float64[],
-            keep = keep,
-            determined = true,
-            relaxation = relaxation,
-            dual_solution = nothing,
-            l = Float64[],
-            c = Float64[],
-            gamma = nothing,
-            psi = psi_node,
-            F = nothing,
-            upsilon_fixing = upsilon_fixing,
-        )
-
-    else
-        fixed_gamma === nothing &&
-            error(
-                "fixed_gamma is required for a determined DDGFactplusUpsilon node. " *
-                "Use the gamma from the last calibration."
-            )
-
-        local gamma
-        local psi_node
-
-        setup_time = @elapsed begin
-            gamma = copy(fixed_gamma)
-
-            psi_node, _ = max_feasible_psi(
-                Ck,
-                gamma;
-                psi_margin = get(calibration_params, :psi_margin, psi_margin),
-                psi_floor = get(calibration_params, :psi_floor, psi_floor),
-            )
-        end
-
-        _add_bnb_timing!(:node_setup_time, setup_time)
-
-        local ub_node
-        local y
-        local F
-
-        value_time = @elapsed begin
-            ub_node, y, F = DDGFactplusUpsilon_value_at_x(
-                x,
-                Ck,
-                gamma,
-                t,
-                psi_node;
-                atol = atol,
-            )
-        end
-
-        _add_bnb_timing!(:factorization_time, value_time)
-        _add_bnb_timing!(:bound_computation_time, value_time)
-
-        return (
-            ub = ub_node,
-            x = x,
-            y = y,
-            keep = keep,
-            determined = true,
-            relaxation = relaxation,
-            dual_solution = nothing,
-            l = Float64[],
-            c = Float64[],
-            gamma = gamma,
-            psi = psi_node,
-            F = F,
-            primal_obj = ub_node,
-            calibration = nothing,
-            upsilon_fixing = upsilon_fixing,
-        )
-    end
+    return _node_result(
+        relaxation,
+        keep,
+        x,
+        ub;
+        determined = true,
+        primal_obj = ub,
+        psi = relaxation == :DDGFact ? 0.0 : psi,
+    )
 end
 
-
-function _bound_ddgfact_node(
-    Ck::Symmetric,
-    s::Int,
-    t::Int,
-    fix1::Vector{Int},
-    l::Vector{Float64},
-    c::Vector{Float64};
-    atol::Float64,
-)
-    local x
-    local primal_obj
-
-    relaxation_time = @elapsed begin
-        x, primal_obj = ddfact_gmesp(
-            Ck,
-            s,
-            t;
-            J1 = fix1,
-            atol = atol,
-        )
-    end
-
-    _add_bnb_timing!(:relaxation_solve_time, relaxation_time)
-    _add_bnb_timing!(:knitro_time, relaxation_time)
-
-    local F
-
-    factorization_time = @elapsed begin
-        F = factorize_matrix(Ck; atol = atol)
-    end
-
-    _add_bnb_timing!(:factorization_time, factorization_time)
-
-    local dual_sol
-
-    dual_time = @elapsed begin
-        dual_sol = DGFact_dual_solution_from_DDGFact_x(
-            x,
-            F,
-            s,
-            t;
-            l = l,
-            c = c,
-            atol = atol,
-        )
-    end
-
-    _add_bnb_timing!(:dual_solution_time, dual_time)
-
-    return x, primal_obj, F, dual_sol
-end
-
-
-function _bound_ddgfactplus_node(
-    Ck::Symmetric,
-    s::Int,
-    t::Int,
-    fix1::Vector{Int},
-    l::Vector{Float64},
-    c::Vector{Float64};
-    psi::Union{Nothing,Float64},
-    atol::Float64,
-    psi_margin::Float64,
-    psi_floor::Float64,
-)
-    psi_node =
-        psi === nothing ?
-        _default_psi(Ck; psi_margin = psi_margin, psi_floor = psi_floor) :
-        psi
-
-    local x
-    local primal_obj
-
-    relaxation_time = @elapsed begin
-        x, primal_obj = aug_ddfact_gmesp(
-            Ck,
-            s,
-            t,
-            psi_node;
-            J1 = fix1,
-            atol = atol,
-        )
-    end
-
-    _add_bnb_timing!(:relaxation_solve_time, relaxation_time)
-    _add_bnb_timing!(:knitro_time, relaxation_time)
-
-    local F
-
-    factorization_time = @elapsed begin
-        F = factorize_matrix(Ck; psi = psi_node, atol = atol)
-    end
-
-    _add_bnb_timing!(:factorization_time, factorization_time)
-
-    local dual_sol
-
-    dual_time = @elapsed begin
-        dual_sol = DGFactplus_dual_solution_from_DDGFactplus_x(
-            x,
-            F,
-            s,
-            t,
-            psi_node;
-            l = l,
-            c = c,
-            atol = atol,
-        )
-    end
-
-    _add_bnb_timing!(:dual_solution_time, dual_time)
-
-    return x, primal_obj, F, dual_sol, psi_node
-end
-
-
-function _require_calibration_xy(calib, calibration_method::Symbol)
-    if calib === nothing
-        error("Calibration method $(calibration_method) returned nothing.")
-    end
-
-    if !(:x in propertynames(calib)) || !(:y in propertynames(calib))
-        error(
-            "Calibration method $(calibration_method) must return x and y " *
-            "when calibrated nodes use calibration iterates directly."
-        )
-    end
-
-    return Vector{Float64}(calib.x), Vector{Float64}(calib.y)
-end
-
-
-function _bound_ddgfactplus_upsilon_node(
-    Ck::Symmetric,
-    s::Int,
-    t::Int,
-    fix1::Vector{Int},
-    l::Vector{Float64},
-    c::Vector{Float64};
-    calibration_method::Symbol,
-    calibration_params,
-    atol::Float64,
-    psi_margin::Float64,
-    psi_floor::Float64,
-    calibrate_upsilon::Bool = true,
-    fixed_gamma::Union{Nothing,Vector{Float64}} = nothing,
-)
-    local x
-    local y
-    local primal_obj
-    local gamma
-    local psi_node
-    local calib
-
-    method = _normalize_calibration_method(calibration_method)
-
-    if calibrate_upsilon
-        calibration_time = @elapsed begin
-            calib = _calibrate_upsilon_from_params(
-                Ck,
-                s,
-                t,
-                method,
-                calibration_params;
-                J1 = fix1,
-                atol = atol,
-            )
-        end
-
-        _add_bnb_timing!(:upsilon_calibration_time, calibration_time)
-
-        if _calibration_method_uses_knitro(method)
-            _add_bnb_timing!(:knitro_time, calibration_time)
-        end
-
-        gamma = calib.gamma
-        psi_node = calib.psi
-    else
-        fixed_gamma === nothing &&
-            error("fixed_gamma is required when calibrate_upsilon = false.")
-
-        calib = nothing
-        gamma = copy(fixed_gamma)
-
-        psi_node, _ = max_feasible_psi(
-            Ck,
-            gamma;
-            psi_margin = get(calibration_params, :psi_margin, psi_margin),
-            psi_floor = get(calibration_params, :psi_floor, psi_floor),
-        )
-    end
-
-    if calibrate_upsilon
-        x, y = _require_calibration_xy(calib, method)
-
-        primal_obj = NaN
-    else
-        relaxation_time = @elapsed begin
-            x, y, primal_obj = aug_ddfact_upsilon_gmesp(
-                Ck,
-                gamma,
-                s,
-                t,
-                psi_node;
-                J1 = fix1,
-                x0 = nothing,
-                y0 = nothing,
-                atol = atol,
-                knitro_outlev = get(
-                    calibration_params,
-                    :relax_knitro_outlev,
-                    get(calibration_params, :knitro_outlev, nothing),
-                ),
-                knitro_opttol = get(
-                    calibration_params,
-                    :relax_knitro_opttol,
-                    get(calibration_params, :knitro_opttol, nothing),
-                ),
-                knitro_feastol = get(
-                    calibration_params,
-                    :relax_knitro_feastol,
-                    get(calibration_params, :knitro_feastol, nothing),
-                ),
-            )
-        end
-
-        _add_bnb_timing!(:relaxation_solve_time, relaxation_time)
-        _add_bnb_timing!(:knitro_time, relaxation_time)
-    end
-
-    local F
-
-    factorization_time = @elapsed begin
-        F = scaled_factorize_matrix(
-            Ck,
-            gamma,
-            psi_node;
-            atol = atol,
-        )
-    end
-
-    _add_bnb_timing!(:factorization_time, factorization_time)
-
-        local dual_sol
-
-    dual_time = @elapsed begin
-        theta_data =
-            construct_Theta_from_x_DDGFactplus(
-                x,
-                F,
-                t,
-                psi_node;
-                atol = atol,
-            )
-
-        Theta = theta_data.Theta
-
-        # d = diag(F * Theta * F')
-        d = vec(sum((F * Theta) .* F; dims = 2))
-
-        greedy_sol =
-            solve_GTheta_upsilon_with_greedy(
-                d,
-                gamma,
-                s,
-                t;
-                l = l,
-                c = c,
-                atol = atol,
-                silent = true,
-            )
-
-        dual_obj_data =
-            DGFactplusUpsilon_objective_value(
-                Theta,
-                greedy_sol.upsilon,
-                greedy_sol.nu,
-                greedy_sol.tau,
-                greedy_sol.alpha,
-                s,
-                t,
-                psi_node;
-                l = l,
-                c = c,
-                atol = atol,
-            )
-
-        dual_sol = merge(
-            greedy_sol,
-            (
-                Theta = Theta,
-                objective_value =
-                    dual_obj_data.objective_value,
-            ),
-        )
-    end
-
-    _add_bnb_timing!(:dual_solution_time, dual_time)
-
-    return x, y, primal_obj, gamma, psi_node, F, dual_sol, calib
-end
-
-
+# Bound a node using the selected relaxation.
 function _gmesp_node(
     C::Symmetric,
     s::Int,
@@ -1087,493 +272,69 @@ function _gmesp_node(
     cf_trace::Bool = false,
     psi_trace::Union{Nothing,Float64} = nothing,
     diagonal_order::Union{Nothing,Vector{Int}} = nothing,
-    calibration_method::Symbol = :bfgs,
-    calibration_params = Dict{Symbol,Any}(),
     atol::Float64 = 1e-8,
     psi_margin::Float64 = 1e-7,
     psi_floor::Float64 = 0.0,
-    upsilon_fixing::Symbol = :simple,
-    calibrate_upsilon::Bool = true,
-    fixed_gamma::Union{Nothing,Vector{Float64}} = nothing,
-    warm_start::Bool = false,
 )
     relaxation = _normalize_relaxation(relaxation)
-    calibration_method = _normalize_calibration_method(calibration_method)
 
-    local n
-    local keep
-    local n_red
-    local infeasible_intersection
-    local infeasible_size
-    local Ck = nothing
+    keep = Int[]
+    infeasible = false
 
     setup_time = @elapsed begin
-        n = size(C, 1)
-        keep = setdiff(1:n, F0)
-        n_red = length(keep)
-
-        infeasible_intersection = !isempty(intersect(F1, F0))
-        infeasible_size = length(F1) > s || s > n_red
-
-        if !(infeasible_intersection || infeasible_size) && relaxation != :Trace
-            Ck = Symmetric(Matrix(C[keep, keep]))
-        end
+        keep = setdiff(1:size(C, 1), F0)
+        infeasible =
+            !isempty(intersect(F1, F0)) ||
+            length(F1) > s ||
+            length(keep) < s
     end
 
     _add_bnb_timing!(:node_setup_time, setup_time)
 
-    if infeasible_intersection || infeasible_size
-        return _infeasible_node_return(keep, relaxation, upsilon_fixing)
-    end
+    infeasible &&
+        return _infeasible_node_return(keep, relaxation)
 
-    if length(F1) == s || n_red == s
-        local S
-        local Sset
-        local x
-
-        setup_time = @elapsed begin
-            S = length(F1) == s ? sort(F1) : copy(keep)
-            Sset = Set(S)
-            x = [keep[k] in Sset ? 1.0 : 0.0 for k in eachindex(keep)]
-        end
-
-        _add_bnb_timing!(:node_setup_time, setup_time)
-
+    if length(F1) == s || length(keep) == s
         return _determined_node(
-            C,
-            Ck,
-            s,
-            t,
-            keep,
-            F1,
-            x;
-            relaxation = relaxation,
+            C, s, t, keep, F1, relaxation;
             psi = psi,
-            calibration_method = calibration_method,
-            calibration_params = calibration_params,
-            atol = atol,
-            psi_margin = psi_margin,
-            psi_floor = psi_floor,
-            upsilon_fixing = upsilon_fixing,
-            fixed_gamma = fixed_gamma,
         )
     end
 
     if relaxation == :Trace
-        psi === nothing && error("Trace relaxation requires psi.")
-
-        diagonal_order === nothing &&
-            error("Trace relaxation requires diagonal_order.")
-
-        bound_time = @elapsed begin
-            ub = trace_upper_bound_sorted(
-                C,
-                s,
-                t,
-                psi,
-                diagonal_order;
-                F1 = F1,
-                F0 = F0,
-            )
-        end
-
-        _add_bnb_timing!(:bound_computation_time, bound_time)
-
-        return (
-            ub = ub,
-            x = Float64[],
-            y = Float64[],
-            keep = keep,
-            determined = false,
-            relaxation = relaxation,
-            dual_solution = nothing,
-            l = Float64[],
-            c = Float64[],
-            gamma = nothing,
+        return _bound_trace_node(
+            C, s, t, F1, F0, keep;
             psi = psi,
-            F = nothing,
-            primal_obj = NaN,
-            upsilon_fixing = upsilon_fixing,
+            diagonal_order = diagonal_order,
+            atol = atol,
         )
     end
 
-    local fix1
-    local l
-    local c
+    Ck = Symmetric(Matrix(C[keep, keep]))
+    fix1 = _local_fix1_indices(keep, F1)
 
-    setup_time = @elapsed begin
-        fix1 = _local_fix1_indices(keep, F1)
+    l = zeros(Float64, length(keep))
+    c = ones(Float64, length(keep))
+    l[fix1] .= 1.0
 
-        l = zeros(n_red)
-        c = ones(n_red)
-        l[fix1] .= 1.0
-    end
-
-    _add_bnb_timing!(:node_setup_time, setup_time)
-
-    if cf_trace && relaxation in (:DDGFact, :DDGFactplus)
-        local psi_node
-        local cf_valid
-        local x_cf
-        local S_cf
-
-        psi_time = @elapsed begin
-            psi_node =
-                relaxation == :DDGFact ?
-                0.0 :
-                (
-                    psi === nothing ?
-                    _default_psi(Ck; psi_margin = psi_margin, psi_floor = psi_floor) :
-                    psi
-                )
-        end
-
-        _add_bnb_timing!(:node_setup_time, psi_time)
-
-        cf_time = @elapsed begin
-            cf_valid, x_cf, S_cf =
-                closed_form_general(
-                    Ck,
-                    s,
-                    t,
-                    psi_node;
-                    J1 = fix1,
-                    atol = atol,
-                )
-        end
-
-        _add_bnb_timing!(:closed_form_time, cf_time)
-
-        if cf_valid
-            local F
-            local dual_sol
-            local primal_obj
-
-            if relaxation == :DDGFact
-                primal_obj = DDGFact_value_at_x(
-                    x_cf,
-                    Ck,
-                    t;
-                    atol = atol,
-                )
-
-                factorization_time = @elapsed begin
-                    F = factorize_matrix(
-                        Ck;
-                        atol = atol,
-                    )
-                end
-
-                _add_bnb_timing!(:factorization_time, factorization_time)
-
-                dual_time = @elapsed begin
-                    dual_sol = DGFact_dual_solution_from_DDGFact_x(
-                        x_cf,
-                        F,
-                        s,
-                        t;
-                        l = l,
-                        c = c,
-                        atol = atol,
-                    )
-                end
-
-                _add_bnb_timing!(:dual_solution_time, dual_time)
-
-            else
-                primal_obj = DDGFactplus_value_at_x(
-                    x_cf,
-                    Ck,
-                    t,
-                    psi_node;
-                    atol = atol,
-                )
-
-                factorization_time = @elapsed begin
-                    F = factorize_matrix(
-                        Ck;
-                        psi = psi_node,
-                        atol = atol,
-                    )
-                end
-
-                _add_bnb_timing!(:factorization_time, factorization_time)
-
-                dual_time = @elapsed begin
-                    dual_sol = DGFactplus_dual_solution_from_DDGFactplus_x(
-                        x_cf,
-                        F,
-                        s,
-                        t,
-                        psi_node;
-                        l = l,
-                        c = c,
-                        atol = atol,
-                    )
-                end
-
-                _add_bnb_timing!(:dual_solution_time, dual_time)
-            end
-
-            _add_bnb_timing!(:closed_form_uses, 1.0)
-
-            return (
-                ub = dual_sol.objective_value,
-                x = x_cf,
-                y = Float64[],
-                keep = keep,
-                determined = false,
-                relaxation = relaxation,
-                dual_solution = dual_sol,
-                l = l,
-                c = c,
-                gamma = nothing,
-                psi = psi_node,
-                F = F,
-                primal_obj = primal_obj,
-                upsilon_fixing = upsilon_fixing,
-                closed_form = true,
-            )
-        end
-    end
-
-    if relaxation == :DDGFact
-        local x
-        local primal_obj
-        local F
-        local dual_sol
-
-        bound_time = @elapsed begin
-            x, primal_obj, F, dual_sol =
-                _bound_ddgfact_node(
-                    Ck,
-                    s,
-                    t,
-                    fix1,
-                    l,
-                    c;
-                    atol = atol,
-                )
-        end
-
-        _add_bnb_timing!(:bound_computation_time, bound_time)
-
-        return (
-            ub = dual_sol.objective_value,
-            x = x,
-            y = Float64[],
-            keep = keep,
-            determined = false,
-            relaxation = relaxation,
-            dual_solution = dual_sol,
-            l = l,
-            c = c,
-            gamma = nothing,
-            psi = 0.0,
-            F = F,
-            primal_obj = primal_obj,
-            upsilon_fixing = upsilon_fixing,
-        )
-    elseif relaxation == :DDGFactplus
-        local x
-        local primal_obj
-        local F
-        local dual_sol
-        local psi_node
-
-        bound_time = @elapsed begin
-            x, primal_obj, F, dual_sol, psi_node =
-                _bound_ddgfactplus_node(
-                    Ck,
-                    s,
-                    t,
-                    fix1,
-                    l,
-                    c;
-                    psi = psi,
-                    atol = atol,
-                    psi_margin = psi_margin,
-                    psi_floor = psi_floor,
-                )
-        end
-
-        _add_bnb_timing!(:bound_computation_time, bound_time)
-
-        return (
-            ub = dual_sol.objective_value,
-            x = x,
-            y = Float64[],
-            keep = keep,
-            determined = false,
-            relaxation = relaxation,
-            dual_solution = dual_sol,
-            l = l,
-            c = c,
-            gamma = nothing,
-            psi = psi_node,
-            F = F,
-            primal_obj = primal_obj,
-            upsilon_fixing = upsilon_fixing,
-            closed_form = false,
-        )
-    else
-        local x
-        local y
-        local primal_obj
-        local gamma
-        local psi_node
-        local F
-        local dual_sol
-        local calib
-
-        bound_time = @elapsed begin
-            x, y, primal_obj, gamma, psi_node, F, dual_sol, calib =
-                _bound_ddgfactplus_upsilon_node(
-                    Ck,
-                    s,
-                    t,
-                    fix1,
-                    l,
-                    c;
-                    calibration_method = calibration_method,
-                    calibration_params = calibration_params,
-                    atol = atol,
-                    psi_margin = psi_margin,
-                    psi_floor = psi_floor,
-                    calibrate_upsilon = calibrate_upsilon,
-                    fixed_gamma = fixed_gamma,
-                )
-        end
-
-        _add_bnb_timing!(:bound_computation_time, bound_time)
-
-        return (
-            ub = dual_sol.objective_value,
-            x = x,
-            y = y,
-            keep = keep,
-            determined = false,
-            relaxation = relaxation,
-            dual_solution = dual_sol,
-            l = l,
-            c = c,
-            gamma = gamma,
-            psi = psi_node,
-            F = F,
-            primal_obj = primal_obj,
-            calibration = calib,
-            upsilon_fixing = upsilon_fixing,
-        )
-    end
+    return _bound_relaxation_node(
+        Val(relaxation),
+        Ck,
+        s,
+        t,
+        fix1,
+        keep,
+        l,
+        c;
+        psi = psi,
+        cf_trace = cf_trace,
+        atol = atol,
+        psi_margin = psi_margin,
+        psi_floor = psi_floor,
+    )
 end
 
-
-# =============================================================================
-# Variable fixing
-# =============================================================================
-
-function _dual_variable_fixing(
-    r,
-    s::Int,
-    t::Int,
-    lb::Float64;
-    tol::Real = 1e-9,
-)
-    if r.relaxation == :DDGFact
-        return var_fixing_from_DGFact(
-            r.dual_solution.upsilon,
-            r.dual_solution.nu,
-            r.ub,
-            lb;
-            l = r.l,
-            c = r.c,
-            atol = Float64(tol),
-        )
-    elseif r.relaxation == :DDGFactplus
-        return var_fixing_from_DGFactplus(
-            r.dual_solution.upsilon,
-            r.dual_solution.nu,
-            r.ub,
-            lb;
-            l = r.l,
-            c = r.c,
-            atol = Float64(tol),
-        )
-    else
-        dual_sol = r.dual_solution
-
-        if r.upsilon_fixing == :strong
-            return var_fixing_from_DGFactplusUpsilon_strong(
-                dual_sol.upsilon,
-                dual_sol.nu,
-                dual_sol.eta,
-                dual_sol.rho,
-                dual_sol.objective_value,
-                lb,
-                s,
-                t;
-                l = r.l,
-                c = r.c,
-                atol = Float64(tol),
-                silent = true,
-            )
-        else
-            return var_fixing_from_DGFactplusUpsilon_simple(
-                dual_sol.upsilon,
-                dual_sol.nu,
-                dual_sol.eta,
-                dual_sol.rho,
-                dual_sol.objective_value,
-                lb;
-                l = r.l,
-                c = r.c,
-                atol = Float64(tol),
-            )
-        end
-    end
-end
-
-
-function _primal_variable_fixing(
-    r,
-    s::Int,
-    t::Int,
-    lb::Float64;
-    tol::Real = 1e-9,
-)
-    if r.relaxation == :DDGFactplus
-        return var_fixing_DDGFactplus_primal(
-            r.x,
-            r.F,
-            s,
-            t,
-            r.psi,
-            lb;
-            l = r.l,
-            c = r.c,
-            atol = Float64(tol),
-        )
-    elseif r.relaxation == :DDGFactplusUpsilon
-        return var_fixing_DDGFactplusUpsilon_primal(
-            r.x,
-            r.y,
-            r.gamma,
-            r.F,
-            s,
-            t,
-            r.psi,
-            lb;
-            l = r.l,
-            c = r.c,
-            atol = Float64(tol),
-            silent = true,
-        )
-    else
-        return (fix_zero = Int[], fix_one = Int[])
-    end
-end
-
-
+# Apply the relaxation-specific variable-fixing rules.
 function variable_fixing_relaxation_soln(
     F1::Vector{Int},
     F0::Vector{Int},
@@ -1586,48 +347,570 @@ function variable_fixing_relaxation_soln(
 )
     fixing_rule = _normalize_fixing_rule(fixing_rule)
 
-    if fixing_rule == :none
+    if fixing_rule == :none ||
+       r.relaxation == :Trace ||
+       r.dual_solution === nothing
         return sort(F1), sort(F0)
     end
 
-    if r.relaxation == :DDGFact && fixing_rule ∉ (:none, :dual)
-        error("DDGFact currently supports only fixing_rule = :none or :dual.")
+    _validate_bnb_options(r.relaxation, fixing_rule)
+
+    fixing = _fixing_relaxation(
+        Val(r.relaxation),
+        r,
+        s,
+        t,
+        lb;
+        fixing_rule = fixing_rule,
+        tol = Float64(tol),
+    )
+
+    F1new = sort(union(F1, r.keep[fixing.fix_one]))
+    F0new = sort(union(F0, r.keep[fixing.fix_zero]))
+
+    return F1new, F0new
+end
+
+# Initialize the incumbent using local search.
+function _initial_incumbent(
+    C::Symmetric,
+    s::Int,
+    t::Int,
+)
+    x_ls, lb = run_all_LS(C, s, t)
+    S_inc = sort(findall(x_ls .> 0.5))
+    return x_ls, lb, S_inc
+end
+
+# Register an integer relaxation solution.
+function _register_integer_solution!(
+    C::Symmetric,
+    s::Int,
+    t::Int,
+    r,
+    state::Base.RefValue,
+)
+    _is_integer_point(r.x) || return nothing
+
+    true_obj, S = _subset_value(C, s, t, r.keep, r.x)
+    isfinite(true_obj) || return nothing
+
+    st = state[]
+    int_gap = r.ub - true_obj
+
+    lb = st.lb
+    S_inc = st.S_inc
+    int_gap_inc = st.int_gap_inc
+
+    if true_obj > lb
+        lb = true_obj
+        S_inc = S
+        int_gap_inc = int_gap
     end
 
-    fix_zero = Int[]
-    fix_one = Int[]
+    state[] = (
+        lb = lb,
+        S_inc = S_inc,
+        n_int_sols = st.n_int_sols + 1,
+        int_gap_sum = st.int_gap_sum + int_gap,
+        int_gap_max = max(st.int_gap_max, int_gap),
+        int_gap_inc = int_gap_inc,
+    )
 
-    if fixing_rule in (:dual, :both)
-        fixing_dual = _dual_variable_fixing(
+    return nothing
+end
+
+# Add a node to the open list if its bound survives.
+function _push_if_survives!(
+    open,
+    F1::Vector{Int},
+    F0::Vector{Int},
+    r,
+    lb::Float64,
+    depth::Int,
+)
+    r.determined && return false
+    r.ub <= lb && return false
+
+    push!(
+        open,
+        GMESPNode(F1, F0, r.ub, r.x, r.keep, depth),
+    )
+
+    return true
+end
+
+# Bound and process a child node.
+function _bound_child!(
+    C::Symmetric,
+    s::Int,
+    t::Int,
+    F1::Vector{Int},
+    F0::Vector{Int},
+    parent::GMESPNode,
+    open,
+    state::Base.RefValue,
+    counters::Base.RefValue,
+    node_kwargs;
+    fixing_rule::Symbol,
+    atol::Float64,
+)
+    depth = parent.depth + 1
+
+    if node_kwargs.relaxation == :Trace
+        r = _gmesp_node(C, s, t, F1, F0; node_kwargs...)
+
+        cnt = counters[]
+        counters[] = (
+            nodes = cnt.nodes + 1,
+            nfix0 = cnt.nfix0,
+            nfix1 = cnt.nfix1,
+        )
+
+        _register_integer_solution!(C, s, t, r, state)
+        _push_if_survives!(open, F1, F0, r, state[].lb, depth)
+
+        return nothing
+    end
+
+    if node_kwargs.cf_trace
+        ub_trace = trace_upper_bound(
+            C,
+            s,
+            t,
+            node_kwargs.psi_trace;
+            F1 = F1,
+            F0 = F0,
+        )
+
+        if ub_trace <= state[].lb
+            _add_bnb_timing!(:trace_prunes, 1)
+            return nothing
+        end
+    end
+
+    r = _gmesp_node(C, s, t, F1, F0; node_kwargs...)
+
+    cnt = counters[]
+    counters[] = (
+        nodes = cnt.nodes + 1,
+        nfix0 = cnt.nfix0,
+        nfix1 = cnt.nfix1,
+    )
+
+    _register_integer_solution!(C, s, t, r, state)
+
+    (r.determined || r.ub <= state[].lb) && return nothing
+
+    F1new = F1
+    F0new = F0
+
+    fixing_time = @elapsed begin
+        F1new, F0new = variable_fixing_relaxation_soln(
+            F1,
+            F0,
             r,
             s,
             t,
-            lb;
-            tol = tol,
+            state[].lb;
+            fixing_rule = fixing_rule,
+            tol = atol,
         )
-
-        append!(fix_zero, fixing_dual.fix_zero)
-        append!(fix_one, fixing_dual.fix_one)
     end
 
-    if fixing_rule in (:primal, :both)
-        fixing_primal = _primal_variable_fixing(
-            r,
+    _add_bnb_timing!(:variable_fixing_time, fixing_time)
+    _add_bnb_timing!(:variable_fixing_calls, 1)
+
+    if length(F1new) > length(F1) || length(F0new) > length(F0)
+        cnt = counters[]
+
+        counters[] = (
+            nodes = cnt.nodes,
+            nfix0 = cnt.nfix0 + length(F0new) - length(F0),
+            nfix1 = cnt.nfix1 + length(F1new) - length(F1),
+        )
+
+        if node_kwargs.cf_trace
+            ub_trace = trace_upper_bound(
+                C,
+                s,
+                t,
+                node_kwargs.psi_trace;
+                F1 = F1new,
+                F0 = F0new,
+            )
+
+            if ub_trace <= state[].lb
+                _add_bnb_timing!(:trace_prunes, 1)
+                return nothing
+            end
+        end
+
+        r = _gmesp_node(
+            C, s, t, F1new, F0new;
+            node_kwargs...,
+        )
+
+        _register_integer_solution!(C, s, t, r, state)
+
+        (r.determined || r.ub <= state[].lb) && return nothing
+
+        F1 = F1new
+        F0 = F0new
+    end
+
+    _push_if_survives!(
+        open,
+        F1,
+        F0,
+        r,
+        state[].lb,
+        depth,
+    )
+
+    return nothing
+end
+
+# Print the root-node summary.
+function _print_root_log(
+    relaxation::Symbol,
+    fixing_rule::Symbol,
+    lb::Float64,
+    ub::Float64,
+)
+    @printf(
+        "root: relaxation = %s  fixing = %s  lb = %.4f  ub = %.4f  gap = %.4f\n",
+        String(relaxation),
+        String(fixing_rule),
+        lb,
+        ub,
+        ub - lb,
+    )
+    flush(stdout)
+    return nothing
+end
+
+# Print the current B&B progress.
+function _print_progress(
+    nodes::Int,
+    open,
+    nfix0::Int,
+    nfix1::Int,
+    lb::Float64,
+)
+    ub = isempty(open) ? lb : max(lb, first(open).ub)
+
+    @printf(
+        "nodes = %d  open = %d  fix0 = %d  fix1 = %d  lb = %.4f  ub = %.4f  gap = %.4f\n",
+        nodes,
+        length(open),
+        nfix0,
+        nfix1,
+        lb,
+        ub,
+        ub - lb,
+    )
+
+    flush(stdout)
+    return nothing
+end
+
+# Print the final B&B summary.
+function _print_final_log(
+    status::String,
+    relaxation::Symbol,
+    fixing_rule::Symbol,
+    nodes::Int,
+    nfix0::Int,
+    nfix1::Int,
+    lb::Float64,
+    ub::Float64,
+    n_int_sols::Int,
+    int_gap_max::Float64,
+    int_gap_avg::Float64,
+    int_gap_opt::Float64,
+)
+    @printf(
+        "done [%s]. relaxation = %s  fixing = %s  nodes = %d  fix0 = %d  fix1 = %d  lb = %.4f  ub = %.4f  gap = %.4f\n",
+        status,
+        String(relaxation),
+        String(fixing_rule),
+        nodes,
+        nfix0,
+        nfix1,
+        lb,
+        ub,
+        ub - lb,
+    )
+
+    @printf(
+        "integer solns = %d  max int-gap = %.4f  avg int-gap = %.4f  int-gap@opt = %.4f\n",
+        n_int_sols,
+        int_gap_max,
+        int_gap_avg,
+        int_gap_opt,
+    )
+
+    flush(stdout)
+    return nothing
+end
+
+# Solve GMESP using branch-and-bound.
+function solve_bnb_gmesp(
+    C::Symmetric,
+    s::Int,
+    t::Int;
+    relaxation = DDGFact,
+    fixing_rule::Symbol = relaxation == TraceBound ? :none : :dual,
+    psi::Union{Nothing,Float64} = nothing,
+    cf_trace::Bool = false,
+    time_limit::Real = 3600.0,
+    verbose::Bool = true,
+    atol::Float64 = 1e-8,
+    psi_margin::Float64 = 1e-7,
+    psi_floor::Float64 = 0.0,
+)
+    n = size(C, 1)
+    @assert 1 <= t <= s < n
+
+    relaxation = _normalize_relaxation(relaxation)
+    fixing_rule = _normalize_fixing_rule(fixing_rule)
+    _validate_bnb_options(relaxation, fixing_rule)
+
+    diagonal_order = nothing
+
+    if relaxation == :Trace
+        psi = _trace_psi(C, psi; atol = atol)
+        diagonal_order = sortperm(diag(C); rev = true)
+    end
+
+    _, lb0, S_inc0 = _initial_incumbent(C, s, t)
+
+    _reset_bnb_timing!()
+
+    state = Ref((
+        lb = lb0,
+        S_inc = S_inc0,
+        n_int_sols = 0,
+        int_gap_sum = 0.0,
+        int_gap_max = 0.0,
+        int_gap_inc = NaN,
+    ))
+
+    counters = Ref((
+        nodes = 1,
+        nfix0 = 0,
+        nfix1 = 0,
+    ))
+
+    psi_trace = nothing
+
+    if cf_trace && relaxation != :Trace
+        psi_trace =
+            psi === nothing ?
+            max(0.0, eigmin(C) - psi_margin) :
+            psi
+    end
+
+    node_kwargs = (
+        relaxation = relaxation,
+        psi = psi,
+        cf_trace = cf_trace,
+        psi_trace = psi_trace,
+        diagonal_order = diagonal_order,
+        atol = atol,
+        psi_margin = psi_margin,
+        psi_floor = psi_floor,
+    )
+
+    r_root = _gmesp_node(
+        C,
+        s,
+        t,
+        Int[],
+        Int[];
+        node_kwargs...,
+    )
+
+    ub_root = r_root.ub
+
+    _register_integer_solution!(C, s, t, r_root, state)
+
+    verbose && _print_root_log(
+        relaxation,
+        fixing_rule,
+        state[].lb,
+        ub_root,
+    )
+
+    open = BinaryMaxHeap{GMESPNode}()
+
+    _push_if_survives!(
+        open,
+        Int[],
+        Int[],
+        r_root,
+        state[].lb,
+        0,
+    )
+
+    t0 = time()
+    time_limit_hit = false
+    next_report = 1000
+
+    while !isempty(open)
+        if time() - t0 >= time_limit
+            time_limit_hit = true
+            break
+        end
+
+        node = nothing
+
+        open_list_time = @elapsed begin
+            node = pop!(open)
+        end
+
+        _add_bnb_timing!(:open_list_time, open_list_time)
+
+        node.ub <= state[].lb && continue
+
+        i = _branch_var(
+            C,
+            node.keep,
+            node.x,
+            node.F1,
+            relaxation,
+        )
+
+        i == 0 && continue
+
+        F1child = sort(vcat(node.F1, i))
+
+        _bound_child!(
+            C,
             s,
             t,
-            lb;
-            tol = tol,
+            F1child,
+            node.F0,
+            node,
+            open,
+            state,
+            counters,
+            node_kwargs;
+            fixing_rule = fixing_rule,
+            atol = atol,
         )
 
-        append!(fix_zero, fixing_primal.fix_zero)
-        append!(fix_one, fixing_primal.fix_one)
+        F0child = sort(vcat(node.F0, i))
+
+        _bound_child!(
+            C,
+            s,
+            t,
+            node.F1,
+            F0child,
+            node,
+            open,
+            state,
+            counters,
+            node_kwargs;
+            fixing_rule = fixing_rule,
+            atol = atol,
+        )
+
+        cnt = counters[]
+
+        if verbose && cnt.nodes >= next_report
+            _print_progress(
+                cnt.nodes,
+                open,
+                cnt.nfix0,
+                cnt.nfix1,
+                state[].lb,
+            )
+
+            next_report += 1000
+        end
     end
 
-    fix_zero = sort(unique(fix_zero))
-    fix_one = sort(unique(fix_one))
+    st = state[]
+    cnt = counters[]
 
-    F1n = sort(union(F1, r.keep[fix_one]))
-    F0n = sort(union(F0, r.keep[fix_zero]))
+    tree_exhausted = isempty(open)
 
-    return F1n, F0n
+    final_ub = tree_exhausted ?
+        st.lb :
+        max(st.lb, first(open).ub)
+
+    status = time_limit_hit ? "TIME LIMIT" : "OPTIMAL"
+
+    int_gap_avg =
+        st.n_int_sols == 0 ?
+        NaN :
+        st.int_gap_sum / st.n_int_sols
+
+    verbose && _print_final_log(
+        status,
+        relaxation,
+        fixing_rule,
+        cnt.nodes,
+        cnt.nfix0,
+        cnt.nfix1,
+        st.lb,
+        final_ub,
+        st.n_int_sols,
+        st.int_gap_max,
+        int_gap_avg,
+        st.int_gap_inc,
+    )
+
+    timing = _copy_bnb_timing()
+
+    stats = (
+        nodes = cnt.nodes,
+        lb = st.lb,
+        ub = final_ub,
+        gap = final_ub - st.lb,
+        root_ub = ub_root,
+        nfix0 = cnt.nfix0,
+        nfix1 = cnt.nfix1,
+        n_int_sols = st.n_int_sols,
+        int_gap_max = st.int_gap_max,
+        int_gap_avg = int_gap_avg,
+        int_gap_opt = st.int_gap_inc,
+        wall_time = time() - t0,
+        time_limit_hit = time_limit_hit,
+        tree_exhausted = tree_exhausted,
+        relaxation = relaxation,
+        fixing_rule = fixing_rule,
+        cf_trace = cf_trace,
+        closed_form_uses =
+            Int(round(get(timing, :closed_form_uses, 0.0))),
+        closed_form_time =
+            get(timing, :closed_form_time, 0.0),
+        trace_prunes =
+            Int(round(get(timing, :trace_prunes, 0.0))),
+        knitro_time =
+            get(timing, :knitro_time, 0.0),
+        relaxation_solve_time =
+            get(timing, :relaxation_solve_time, 0.0),
+        factorization_time =
+            get(timing, :factorization_time, 0.0),
+        bound_computation_time =
+            get(timing, :bound_computation_time, 0.0),
+        open_list_time =
+            get(timing, :open_list_time, 0.0),
+        node_setup_time =
+            get(timing, :node_setup_time, 0.0),
+        dual_solution_time =
+            get(timing, :dual_solution_time, 0.0),
+        variable_fixing_direct_time =
+            get(timing, :variable_fixing_time, 0.0),
+        variable_fixing_time =
+            get(timing, :variable_fixing_time, 0.0),
+        variable_fixing_calls =
+            Int(round(get(timing, :variable_fixing_calls, 0.0))),
+    )
+
+    return st.S_inc, stats
 end
