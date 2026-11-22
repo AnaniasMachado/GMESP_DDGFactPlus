@@ -400,12 +400,10 @@ function _register_integer_solution!(
 
     lb = st.lb
     S_inc = st.S_inc
-    int_gap_inc = st.int_gap_inc
 
     if true_obj > lb
         lb = true_obj
         S_inc = S
-        int_gap_inc = int_gap
     end
 
     state[] = (
@@ -414,7 +412,6 @@ function _register_integer_solution!(
         n_int_sols = st.n_int_sols + 1,
         int_gap_sum = st.int_gap_sum + int_gap,
         int_gap_max = max(st.int_gap_max, int_gap),
-        int_gap_inc = int_gap_inc,
     )
 
     return nothing
@@ -628,7 +625,6 @@ function _print_final_log(
     n_int_sols::Int,
     int_gap_max::Float64,
     int_gap_avg::Float64,
-    int_gap_opt::Float64,
 )
     @printf(
         "done [%s]. relaxation = %s  fixing = %s  nodes = %d  fix0 = %d  fix1 = %d  lb = %.4f  ub = %.4f  gap = %.4f\n",
@@ -644,11 +640,10 @@ function _print_final_log(
     )
 
     @printf(
-        "integer solns = %d  max int-gap = %.4f  avg int-gap = %.4f  int-gap@opt = %.4f\n",
+        "integer solns = %d  max int-gap = %.4f  avg int-gap = %.4f\n",
         n_int_sols,
         int_gap_max,
         int_gap_avg,
-        int_gap_opt,
     )
 
     flush(stdout)
@@ -694,7 +689,6 @@ function solve_bnb_gmesp(
         n_int_sols = 0,
         int_gap_sum = 0.0,
         int_gap_max = 0.0,
-        int_gap_inc = NaN,
     ))
 
     counters = Ref((
@@ -861,7 +855,6 @@ function solve_bnb_gmesp(
         st.n_int_sols,
         st.int_gap_max,
         int_gap_avg,
-        st.int_gap_inc,
     )
 
     timing = _copy_bnb_timing()
@@ -877,7 +870,6 @@ function solve_bnb_gmesp(
         n_int_sols = st.n_int_sols,
         int_gap_max = st.int_gap_max,
         int_gap_avg = int_gap_avg,
-        int_gap_opt = st.int_gap_inc,
         wall_time = time() - t0,
         time_limit_hit = time_limit_hit,
         tree_exhausted = tree_exhausted,

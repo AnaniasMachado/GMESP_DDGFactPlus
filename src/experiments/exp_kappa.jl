@@ -177,7 +177,6 @@ cols = [
 
     :bnb_int_gap_max,
     :bnb_int_gap_avg,
-    :bnb_int_gap_opt,
 
     :z_bnb,
     :z_bnb_ub,
